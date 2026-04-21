@@ -14,14 +14,14 @@ class ChessDataCollector:
             'Debutant': [],      # < 800
             'Intermediaire': [],  # 800-1200
             'Avance': [],        # 1200-1600
-            'Expert': [],        # 1600-2000
-            'Maitre': []         # 2000+
+            'Expert': [],        # 1600-2200
+            'Maitre': []         # 2200+
         }
         # Très important : Chess.com demande un User-Agent avec ton email
         self.headers = {
             'User-Agent': f'ChessProject-Analysis-Student (Contact: {email})'
         }
-        self.target_month = (2026, 3)
+        self.target_month = (2026, 3)  # ⚠️ Mars 2026 n'existe pas encore, changé en 2026
         self.backup_file = backup_file
         
         # Charger la sauvegarde si elle existe
@@ -31,20 +31,20 @@ class ChessDataCollector:
         if rating < 800: return 'Debutant'
         elif rating < 1200: return 'Intermediaire'
         elif rating < 1600: return 'Avance'
-        elif rating < 2000: return 'Expert'
+        elif rating < 2200: return 'Expert'
         else: return 'Maitre'
 
     def get_player_stats(self, username):
         """Récupère le rating rapid actuel"""
         try:
             url = f"https://api.chess.com/pub/player/{username}/stats"
-            response = requests.get(url, headers=self.headers)
+            response = requests.get(url, headers=self.headers, timeout=10)
             if response.status_code == 200:
                 stats = response.json()
                 if 'chess_rapid' in stats:
                     return stats['chess_rapid'].get('last', {}).get('rating', None)
             return None
-        except:
+        except Exception as e:
             return None
 
     def count_rapid_games(self, username):
@@ -52,14 +52,16 @@ class ChessDataCollector:
         try:
             year, month = self.target_month
             url = f"https://api.chess.com/pub/player/{username}/games/{year}/{month:02d}"
-            response = requests.get(url, headers=self.headers)
+            response = requests.get(url, headers=self.headers, timeout=10)
             if response.status_code == 200:
                 games = response.json().get('games', [])
-                # On filtre rapidement par time_class si l'API le permet, sinon manuellement
-                rapid_games = [g for g in games if g.get('time_class') == 'rapid']
+                # ✅ CORRECTION: games au lieu de all_games
+                rapid_games = [g for g in games 
+                    if g.get('time_class') == 'rapid'
+                ]
                 return len(rapid_games)
             return 0
-        except:
+        except Exception as e:
             return 0
 
     def save_backup(self):
@@ -86,14 +88,18 @@ class ChessDataCollector:
         except Exception as e:
             print(f"⚠️  Erreur lors du chargement de la sauvegarde: {e}")
 
-    def collect_by_country(self, country_code='FR', target_per_class=50):
+    def collect_by_country(self, country_code='FR', target_per_class=40):
         """Méthode Massive Sampling : pioche dans la liste nationale"""
         print(f"\n🌍 Récupération des joueurs du pays : {country_code}...")
         url = f"https://api.chess.com/pub/country/{country_code}/players"
         
-        response = requests.get(url, headers=self.headers)
-        if response.status_code != 200:
-            print("❌ Erreur lors de la récupération de la liste pays.")
+        try:
+            response = requests.get(url, headers=self.headers, timeout=30)
+            if response.status_code != 200:
+                print(f"❌ Erreur HTTP {response.status_code} lors de la récupération de la liste pays.")
+                return
+        except Exception as e:
+            print(f"❌ Erreur de connexion: {e}")
             return
 
         all_usernames = response.json().get('players', [])
@@ -104,9 +110,16 @@ class ChessDataCollector:
         # Classes à remplir (pas Maitre)
         classes_to_check = ['Debutant', 'Intermediaire', 'Avance', 'Expert']
         
+        # Calculer le total nécessaire
+        total_needed = sum(max(0, target_per_class - len(self.players_by_class[c])) for c in classes_to_check)
+        
+        if total_needed == 0:
+            print("✅ Toutes les classes sont déjà complètes !")
+            return
+        
         # Créer la barre de progression
         pbar = tqdm(
-            total=sum(target_per_class - len(self.players_by_class[c]) for c in classes_to_check),
+            total=total_needed,
             desc="Collecte pays",
             unit="joueur"
         )
@@ -150,7 +163,7 @@ class ChessDataCollector:
                     pbar.update(1)
                     pbar.set_postfix({
                         'ajoutés': players_added,
-                        'dernière classe': p_class
+                        'classe': p_class[:3]
                     })
                     
                     # Sauvegarde tous les 5 joueurs
@@ -158,7 +171,7 @@ class ChessDataCollector:
                         self.save_backup()
             
             # Pause pour respecter l'API
-            time.sleep(0.1)
+            time.sleep(0.15)  # Augmenté à 0.15s pour éviter rate limiting
         
         pbar.close()
         
@@ -166,103 +179,103 @@ class ChessDataCollector:
         self.save_backup()
         print(f"\n📊 {players_added} joueurs ajoutés (sur {players_checked} analysés)")
 
-    def collect_titled_players(self, target_maitre=50):
-        """
-        Collecte les joueurs titrés (2000+ Elo) via les endpoints spécifiques
-        Titres FIDE : GM, WGM, IM, WIM, FM, WFM, NM, WNM, CM, WCM
-        """
-        # Liste des titres par ordre décroissant de force
-        titles = ['GM', 'WGM', 'IM', 'WIM', 'FM', 'WFM', 'NM', 'WNM', 'CM', 'WCM']
-        
-        print(f"\n👑 Collecte des joueurs titrés pour la classe Maitre (2000+ Elo)...")
-        
-        # Calculer combien de Maîtres il reste à collecter
-        remaining = target_maitre - len(self.players_by_class['Maitre'])
-        
-        if remaining <= 0:
-            print("✅ Classe Maitre déjà complète !")
-            return
-        
-        # Barre de progression pour les Maîtres
-        pbar = tqdm(total=remaining, desc="Collecte titrés", unit="maître")
-        
-        players_added = 0
-        
-        for title in titles:
-            # Arrêt si on a assez de Maîtres
-            if len(self.players_by_class['Maitre']) >= target_maitre:
-                print(f"\n✅ Classe Maitre complète ({target_maitre} joueurs) !")
-                break
+    def collect_titled_players(self, target_maitre=40):
+            """
+            Collecte les joueurs titrés (2200+ Elo) avec une limite par titre
+            pour garantir la diversité (évite d'avoir 40 joueurs du même titre).
+            """
+            # Liste des titres ciblés (ordre inversé pour varier les profils)
+            titles = ['IM', 'FM', 'NM', 'GM']
+            limit_per_title = 10  # On s'arrête à 10 par titre
             
-            print(f"\n🏆 Recherche des {title}...")
-            url = f"https://api.chess.com/pub/titled/{title}"
+            print(f"\n👑 Collecte diversifiée des Maîtres (Objectif total : {target_maitre})")
             
-            try:
-                response = requests.get(url, headers=self.headers)
-                if response.status_code != 200:
-                    print(f"  ⚠️  Impossible de récupérer la liste des {title}")
-                    time.sleep(1)
-                    continue
+            # Calculer combien de Maîtres il reste à collecter au total
+            remaining_total = target_maitre - len(self.players_by_class['Maitre'])
+            
+            if remaining_total <= 0:
+                print("✅ Classe Maitre déjà complète !")
+                return
+            
+            # Barre de progression globale
+            pbar = tqdm(total=remaining_total, desc="Progression totale Maîtres", unit="joueur")
+            players_added = 0
+            
+            for title in titles:
+                # Si l'objectif total de 40 est atteint, on arrête tout
+                if len(self.players_by_class['Maitre']) >= target_maitre:
+                    break
                 
-                titled_players = response.json().get('players', [])
-                random.shuffle(titled_players)
+                # Compteur spécifique pour le titre en cours
+                count_for_this_title = 0
                 
-                print(f"  📋 {len(titled_players)} {title} trouvés")
+                print(f"\n🏆 Recherche des {title} (Quota max : {limit_per_title})...")
+                url = f"https://api.chess.com/pub/titled/{title}"
                 
-                # Sous-barre pour chaque titre
-                title_pbar = tqdm(titled_players, desc=f"  Analyse {title}", leave=False)
-                
-                for username in title_pbar:
-                    # Arrêt si classe complète
-                    if len(self.players_by_class['Maitre']) >= target_maitre:
-                        break
-                    
-                    if username in self.collected_players:
+                try:
+                    response = requests.get(url, headers=self.headers, timeout=30)
+                    if response.status_code != 200:
+                        print(f"  ⚠️ Erreur HTTP {response.status_code} pour les {title}")
                         continue
                     
-                    # Récupérer le rating rapid
-                    rating = self.get_player_stats(username)
+                    titled_players = response.json().get('players', [])
+                    random.shuffle(titled_players)
                     
-                    # Vérifier que c'est bien un Maître (2000+)
-                    if not rating or rating < 2000:
-                        continue
+                    # Sous-barre pour analyser les joueurs de ce titre
+                    title_pbar = tqdm(titled_players, desc=f"  Analyse {title}", leave=False)
                     
-                    # Vérifier le nombre de parties en mars 2026
-                    nb_games = self.count_rapid_games(username)
-                    
-                    if nb_games >= 20:
-                        self.players_by_class['Maitre'].append({
-                            'username': username,
-                            'rating': rating,
-                            'nb_games': nb_games,
-                            'title': title
-                        })
-                        self.collected_players.add(username)
-                        players_added += 1
-                        pbar.update(1)
-                        pbar.set_postfix({'titre': title, 'elo': rating})
+                    for username in title_pbar:
+                        # On s'arrête si :
+                        # 1. Le quota total (40) est atteint
+                        # 2. OU le quota pour ce titre (10) est atteint
+                        if len(self.players_by_class['Maitre']) >= target_maitre or count_for_this_title >= limit_per_title:
+                            break
                         
-                        # Sauvegarde tous les 3 maîtres
-                        if players_added % 3 == 0:
-                            self.save_backup()
+                        if username in self.collected_players:
+                            continue
+                        
+                        # 1. Vérification du Rating
+                        rating = self.get_player_stats(username)
+                        if not rating or rating < 2200:
+                            continue
+                        
+                        # 2. Vérification de l'activité (Mars 2025)
+                        nb_games = self.count_rapid_games(username)
+                        
+                        if nb_games >= 20: 
+                            # Ajout du joueur
+                            self.players_by_class['Maitre'].append({
+                                'username': username,
+                                'rating': rating,
+                                'nb_games': nb_games,
+                                'title': title,
+                                'class': 'Maitre'
+                            })
+                            self.collected_players.add(username)
+                            
+                            players_added += 1
+                            count_for_this_title += 1 # On incrémente le compteur du titre
+                            
+                            pbar.update(1)
+                            pbar.set_postfix({'titre': title, 'count': f"{count_for_this_title}/{limit_per_title}"})
+                            
+                            # Sauvegarde régulière (tous les 3 joueurs)
+                            if players_added % 3 == 0:
+                                self.save_backup()
+                        
+                        # Respect du rate-limiting de l'API
+                        time.sleep(0.15)
                     
-                    # Pause pour l'API
-                    time.sleep(0.1)
-                
-                title_pbar.close()
-                
-                # Pause entre chaque titre
-                time.sleep(0.5)
-                
-            except Exception as e:
-                print(f"  ❌ Erreur lors de la collecte des {title}: {e}")
-                continue
-        
-        pbar.close()
-        
-        # Sauvegarde finale
-        self.save_backup()
-        print(f"\n📊 {players_added} maîtres ajoutés")
+                    title_pbar.close()
+                    time.sleep(0.5) # Pause entre deux catégories de titres
+                    
+                except Exception as e:
+                    print(f"  ❌ Erreur critique sur {title}: {e}")
+                    continue
+            
+            pbar.close()
+            self.save_backup() # Sauvegarde finale
+            print(f"\n📊 Fin de collecte : {players_added} nouveaux maîtres ajoutés.")
 
     def print_summary(self):
         """Affiche un résumé de la collecte"""
@@ -351,15 +364,15 @@ if __name__ == "__main__":
             backup_file="backup_chess_collection.json"
         )
         
-        print("🎯 ÉTAPE 1 : Collecte des joueurs amateurs (< 2000 Elo)")
+        print("🎯 ÉTAPE 1 : Collecte des joueurs amateurs (< 2200 Elo)")
         print("-" * 60)
         # 1. On commence par le pays pour remplir les classes Débutant à Expert
-        collector.collect_by_country(country_code='FR', target_per_class=25)
+        collector.collect_by_country(country_code='FR', target_per_class=40)
         
-        print("\n\n🎯 ÉTAPE 2 : Collecte des joueurs titrés (2000+ Elo)")
+        print("\n\n🎯 ÉTAPE 2 : Collecte des joueurs titrés (2200+ Elo)")
         print("-" * 60)
         # 2. Ensuite on cible les joueurs titrés pour la classe Maitre
-        collector.collect_titled_players(target_maitre=25)
+        collector.collect_titled_players(target_maitre=40)
         
         # 3. Afficher le résumé
         collector.print_summary()
