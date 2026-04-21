@@ -321,16 +321,14 @@ class ChessClassifierPipeline2:
         print("="*70)
         
         if params is None:
-            # Paramètres par défaut optimisés
             params = {
                 'n_estimators': 200,
                 'max_depth': 20,
-                'min_samples_split': 5,
-                'min_samples_leaf': 2,
-                'max_features': 'sqrt',
-                'random_state': 42,
+                'random_state': self.seed, # 4. FIXER LE HASARD DANS LE MODÈLE
                 'n_jobs': -1
             }
+        else:
+            params['random_state'] = self.seed
         
         print(f"Paramètres utilisés:")
         for k, v in params.items():
